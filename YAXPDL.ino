@@ -3,6 +3,7 @@
 // Horizontal paddle controller for X68k (ATmega32U4)
 //------------------------------------------------------------
 // 2021-10-26 初版
+// 2022-07-24 MSDATAの出力段の構成を純正マウス準拠に変更
 //------------------------------------------------------------
 // このスケッチのコンパイルには以下のライブラリが必要です:
 //   Encoder (https://www.pjrc.com/teensy/td_libs_Encoder.html)
@@ -24,15 +25,17 @@
 //  4:GND(--)      -- GND
 //  5:GND(--)      -- GND
 
-#define MYDEBUG 0
+//#define MYDEBUG 3
 #define ENCODER_OPTIMIZE_INTERRUPTS   //include行より先に指定する
 #include <Mouse.h>
 #include <Encoder.h>
 #include <SoftwareSerial.h>
+#include <avr/power.h>
 
 #define RXA 2           //ロータリーエンコーダX軸A相
 #define RXB 3           //ロータリーエンコーダX軸B相
 
+#define X68_MSDATA 1    //X68kのMSDATA端子
 #define X68_MSCTRL 0    //X68kのMSCTRL端子(UARTのRXで代用できない場合は5かなあ)
 #define X68_MODE 4      //X68kマウスとして動作するか否か
 
@@ -46,9 +49,11 @@
 #define DIPSW_BIT3 10
 
 Encoder Enc(RXA, RXB);
+SoftwareSerial msSerial(X68_MSCTRL, X68_MSDATA, true);  //RX, TX, inverse_logic
 
 uint8_t leftButtonReleased;       //チャタリング防止用のカウンタ
-uint8_t rightButtonReleased; 
+uint8_t rightButtonReleased;
+boolean USB_EN;
 
 
 void setup() 
@@ -62,11 +67,24 @@ void setup()
   pinMode(DIPSW_BIT2,INPUT_PULLUP);
   pinMode(DIPSW_BIT3,INPUT_PULLUP);
   leftButtonReleased=0;
-  rightButtonReleased=0; 
-  Mouse.begin();
-  Serial1.begin(4800,SERIAL_8N2); //MSDATA送信用
+  rightButtonReleased=0;
+  power_adc_disable();
+  power_spi_disable();
+  power_twi_disable();
+  power_usart1_disable();
+  if (digitalRead(X68_MODE) == HIGH) {
+    USB_EN = false;
+    msSerial.begin(4800); //MSDATA送信用(8N2, inverse_logic)
+#ifndef MYDEBUG
+    power_usb_disable();
+#endif
+  } else {
+    USB_EN = true;
+    Mouse.begin();
+  }
 #if MYDEBUG
-  Serial.begin(9600);             //おなじみのシリアルモニタ
+  Serial.begin(115200);             //おなじみのシリアルモニタ
+  Serial.println(F("HELLO. __DATE__ __TIME__"));
 #endif
 }
 
@@ -77,25 +95,22 @@ void loop() {
   //             X軸倍率  +1  +2  +3  +4  +5  +6  +7  +8  -8  -7  -6  -5  -4  -3  -2  -1
   //
   //リアルコードではなくコンプリメンタリコードのDIPSWを使った場合 LOW/HIGHが逆になる
-  //ところで、もう少し軽くてスマートな記述にできないかコレ
-  if (digitalRead(DIPSW_BIT3)==HIGH){
+  if (digitalRead(DIPSW_BIT3) == HIGH){
     ENCODER_DIV = 1;
-    if (digitalRead(DIPSW_BIT0)==LOW) ENCODER_DIV = ENCODER_DIV + 1;
-    if (digitalRead(DIPSW_BIT1)==LOW) ENCODER_DIV = ENCODER_DIV + 2;
-    if (digitalRead(DIPSW_BIT2)==LOW) ENCODER_DIV = ENCODER_DIV + 4;
+    if (digitalRead(DIPSW_BIT0) == LOW) ENCODER_DIV = ENCODER_DIV + 1;
+    if (digitalRead(DIPSW_BIT1) == LOW) ENCODER_DIV = ENCODER_DIV + 2;
+    if (digitalRead(DIPSW_BIT2) == LOW) ENCODER_DIV = ENCODER_DIV + 4;
   } else {
     ENCODER_DIV = -1;
-    if (digitalRead(DIPSW_BIT0)==HIGH) ENCODER_DIV = ENCODER_DIV - 1;
-    if (digitalRead(DIPSW_BIT1)==HIGH) ENCODER_DIV = ENCODER_DIV - 2;
-    if (digitalRead(DIPSW_BIT2)==HIGH) ENCODER_DIV = ENCODER_DIV - 4;
+    if (digitalRead(DIPSW_BIT0) == HIGH) ENCODER_DIV = ENCODER_DIV - 1;
+    if (digitalRead(DIPSW_BIT1) == HIGH) ENCODER_DIV = ENCODER_DIV - 2;
+    if (digitalRead(DIPSW_BIT2) == HIGH) ENCODER_DIV = ENCODER_DIV - 4;
   }
 
-  if (digitalRead(X68_MODE)==HIGH) {
-    x68_mouse_send(digitalRead(X68_MSCTRL), ENCODER_DIV);
-    return;
-  } else {
+  if (USB_EN) {
     usb_mouse_send(ENCODER_DIV);
-    return;    
+  } else {
+    x68_mouse_send(digitalRead(X68_MSCTRL), ENCODER_DIV);
   }
 }
 
@@ -140,20 +155,18 @@ void x68_mouse_send(uint8_t MSCTRL, long ENCODER_DIV) {
   uint8_t leftButton = digitalRead(LEFTBUTTON);
   uint8_t rightButton = digitalRead(RIGHTBUTTON);
   long dx = Enc.read()*ENCODER_DIV;   //前回送信時からのカウント数が返ってくる
-  long dy = 0;                        //Y軸側エンコーダが存在しないので常に0
+  const long dy = 0;                  //Y軸側エンコーダが存在しないので常に0
 
   if (MSCTRL == LOW && oldCTRL == HIGH) {  //highからlowになった
 #if MYDEBUG == 3
-    Serial.print(F("MSCTRL = ")); Serial.print(MSCTRL);
+    //Serial.print(F("MSCTRL = ")); Serial.print(MSCTRL);
     Serial.print(F(" LEFT  = ")); Serial.print(leftButton); Serial.print(F(" RIGHT = ")); Serial.print(rightButton);
     Serial.print(F(" dX = ")); Serial.print(dx, HEX); Serial.print(F(" 2dX = ")); Serial.print(dx, BIN);
-    Serial.print(F(" dX = ")); Serial.print(dx >> 1, HEX); Serial.print(F(" 2dX = ")); Serial.print(dx >> 1, BIN);
+    Serial.print(F(" dX = ")); Serial.print(dx >> 1, HEX); Serial.print(F(" 2dX = ")); Serial.println(dx >> 1, BIN);
     //Serial.print(F(" dY = ")); Serial.print(dy, HEX); Serial.print(F(" 2dY = ")); Serial.print(dy, BIN);
     //Serial.print(F(" dY = ")); Serial.print(dy >> 1, HEX); Serial.print(F(" 2dY = ")); Serial.println(dy >> 1, BIN);
 #endif
-    //資料の記述は700usec程度遅れてデータが来ることを(X68k本体側が)想定しなければならない、
-    //という意味であって、即座にデータを返す分には問題無い筈
-    //delayMicroseconds(700);
+    delayMicroseconds(700);
     char MSDATA = B00000000;
     if (leftButton == LOW) {  //左ボタン押下
       MSDATA   |= B00000001;
@@ -175,20 +188,22 @@ void x68_mouse_send(uint8_t MSCTRL, long ENCODER_DIV) {
     }
       
     if (dx > 127) {
-      MSDATA |= B00010000;    //X軸オーバーフロー
+      MSDATA |= B00010000;    //X軸オーバーフロー(プラス方向)
       dx = 127;
     }
     if (dx < -128) {
-      MSDATA |= B00100000;    //X軸アンダーフロー
+      MSDATA |= B00100000;    //X軸オーバーフロー(マイナス方向)
       dx = -128;
     }
 
-    //Y軸は存在しないのでオーバーフロー/アンダーフロー判定は不要
+    //Y軸は存在しないのでオーバーフロー判定は不要
 
     //Serial.print(F("MSDATA = ")); Serial.println(MSDATA);
-    Serial1.write(MSDATA);
-    Serial1.write((int8_t)dx);
-    Serial1.write((int8_t)dy);
+    msSerial.write(MSDATA);
+    delayMicroseconds(420);   //stop bitが足りないので2bits分待つ
+    msSerial.write((int8_t)dx);
+    delayMicroseconds(420);   //stop bitが足りないので2bits分待つ
+    msSerial.write((int8_t)dy);
 
     Enc.write(0);             //カウンタをリセット
   }
